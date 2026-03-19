@@ -1,0 +1,22 @@
+.{
+    .name = .zslug,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.2",
+    .paths = .{"src/"},
+    .fingerprint = 0xcc994b0d9fe3f069,
+    .dependencies = .{
+        // To handle windowing and input
+        .zglfw = .{
+            .url = "git+https://github.com/zig-gamedev/zglfw#6034a5623312c58bf5e64c1a2b686691c28575f4",
+            .hash = "zglfw-0.10.0-dev-zgVDNPKyIQCBi-wv_vxkvIQq1u0bP4D56Wszx_2mszc7",
+        },
+        .zgpu = .{
+            .url = "git+https://github.com/braheezy/zgpu#aa8111282ec81b9ac9cc501f9d1210f0dcfbab51",
+            .hash = "zgpu-0.14.0-nqFT5GsZFQAM_eIOImIge0tm4AIaR0np3KHp5FNZBumU",
+        },
+        .zmath = .{
+            .url = "git+https://github.com/zig-gamedev/zmath#HEAD",
+            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+        },
+    },
+}
