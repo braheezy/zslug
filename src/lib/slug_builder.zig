@@ -23,6 +23,14 @@ pub const GlyphInstance = extern struct {
     band_data: [4]u32,
 };
 
+pub const SlugVertex = extern struct {
+    pos: [4]f32,
+    tex: [4]f32,
+    jac: [4]f32,
+    bnd: [4]f32,
+    col: [4]f32,
+};
+
 pub const Scene = struct {
     allocator: std.mem.Allocator,
     curves_width: u32,
@@ -31,12 +39,14 @@ pub const Scene = struct {
     bands_width: u32,
     bands_height: u32,
     bands_texels: []BandTexel,
-    instances: []GlyphInstance,
+    vertices: []SlugVertex,
+    indices: []u32,
 
     pub fn deinit(self: *Scene) void {
         self.allocator.free(self.curves_texels);
         self.allocator.free(self.bands_texels);
-        self.allocator.free(self.instances);
+        self.allocator.free(self.vertices);
+        self.allocator.free(self.indices);
         self.* = undefined;
     }
 };
@@ -135,14 +145,12 @@ const BuildState = struct {
     face: c.FT_Face,
     glyphs: std.AutoHashMap(u32, Glyph),
     curves_texture: std.ArrayList(f32) = .empty,
-    band_headers: std.ArrayList(u32) = .empty,
-    curve_offsets: std.ArrayList(u32) = .empty,
+    bands_texture: std.ArrayList(u32) = .empty,
     band_count_limit: u32 = 16,
 
     fn deinit(self: *BuildState) void {
         self.curves_texture.deinit(self.allocator);
-        self.band_headers.deinit(self.allocator);
-        self.curve_offsets.deinit(self.allocator);
+        self.bands_texture.deinit(self.allocator);
         self.glyphs.deinit();
     }
 };
@@ -176,15 +184,14 @@ pub fn buildDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
         try state.glyphs.put(codepoint, glyph);
     }
 
-    finalizeBandOffsets(&state);
-
     const curves_texels, const curves_height = try padCurvesTexture(allocator, state.curves_texture.items);
-    const bands_texels, const bands_height = try padBandsTexture(allocator, state.band_headers.items, state.curve_offsets.items);
+    const bands_texels, const bands_height = try padBandsTexture(allocator, state.bands_texture.items);
     errdefer allocator.free(curves_texels);
     errdefer allocator.free(bands_texels);
 
-    const instances = try buildInstances(allocator, face, &state.glyphs, viewport, default_phrase);
-    errdefer allocator.free(instances);
+    const geometry = try buildGeometry(allocator, face, &state.glyphs, viewport, default_phrase);
+    errdefer allocator.free(geometry.vertices);
+    errdefer allocator.free(geometry.indices);
 
     return .{
         .allocator = allocator,
@@ -194,7 +201,8 @@ pub fn buildDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
         .bands_width = texture_width,
         .bands_height = bands_height,
         .bands_texels = bands_texels,
-        .instances = instances,
+        .vertices = geometry.vertices,
+        .indices = geometry.indices,
     };
 }
 
@@ -245,7 +253,7 @@ fn processCodepoint(state: *BuildState, codepoint: u32) !Glyph {
 
     fixupCurves(outline_builder.curves.items);
 
-    const bands_texel_index = @as(u32, @intCast(state.band_headers.items.len / 2));
+    const bands_texel_index = @as(u32, @intCast(state.bands_texture.items.len / 2));
     try appendCurvesTexture(&state.curves_texture, outline_builder.curves.items, state.allocator);
 
     const width: u32 = @intCast(width_i);
@@ -259,24 +267,8 @@ fn processCodepoint(state: *BuildState, codepoint: u32) !Glyph {
     }
 
     const band_dim_y = divCeil(size_y, band_count);
-    try appendHorizontalBands(
-        &state.band_headers,
-        &state.curve_offsets,
-        outline_builder.curves.items,
-        band_count,
-        band_dim_y,
-        state.allocator,
-    );
-
     const band_dim_x = divCeil(size_x, band_count);
-    try appendVerticalBands(
-        &state.band_headers,
-        &state.curve_offsets,
-        outline_builder.curves.items,
-        band_count,
-        band_dim_x,
-        state.allocator,
-    );
+    try appendGlyphBandData(&state.bands_texture, outline_builder.curves.items, band_count, band_dim_x, band_dim_y, state.allocator);
 
     return .{
         .codepoint = codepoint,
@@ -362,9 +354,9 @@ fn appendCurvesTexture(buffer: *std.ArrayList(f32), curves: []Curve, allocator: 
     }
 }
 
-fn appendHorizontalBands(
+fn appendHorizontalBandHeaders(
     headers: *std.ArrayList(u32),
-    offsets: *std.ArrayList(u32),
+    curve_pairs: *std.ArrayList(u32),
     curves: []Curve,
     band_count: u32,
     band_dim_y: u32,
@@ -380,7 +372,7 @@ fn appendHorizontalBands(
     var band_min_y: f32 = 0.0;
     var band_max_y: f32 = f_band_dim_y;
     for (0..band_count) |_| {
-        const band_texel_offset = @as(u32, @intCast(offsets.items.len / 2));
+        const band_texel_offset = @as(u32, @intCast(curve_pairs.items.len / 2));
         var curve_count: u32 = 0;
 
         for (curves) |curve| {
@@ -390,8 +382,8 @@ fn appendHorizontalBands(
             const curve_max_y = max3(curve.y1, curve.y2, curve.y3);
             if (curve_min_y > band_max_y or curve_max_y < band_min_y) continue;
 
-            try offsets.append(allocator, curve.texel_index % texture_width);
-            try offsets.append(allocator, curve.texel_index / texture_width);
+            try curve_pairs.append(allocator, curve.texel_index % texture_width);
+            try curve_pairs.append(allocator, curve.texel_index / texture_width);
             curve_count += 1;
         }
 
@@ -402,9 +394,9 @@ fn appendHorizontalBands(
     }
 }
 
-fn appendVerticalBands(
+fn appendVerticalBandHeaders(
     headers: *std.ArrayList(u32),
-    offsets: *std.ArrayList(u32),
+    curve_pairs: *std.ArrayList(u32),
     curves: []Curve,
     band_count: u32,
     band_dim_x: u32,
@@ -420,7 +412,7 @@ fn appendVerticalBands(
     var band_min_x: f32 = 0.0;
     var band_max_x: f32 = f_band_dim_x;
     for (0..band_count) |_| {
-        const band_texel_offset = @as(u32, @intCast(offsets.items.len / 2));
+        const band_texel_offset = @as(u32, @intCast(curve_pairs.items.len / 2));
         var curve_count: u32 = 0;
 
         for (curves) |curve| {
@@ -430,8 +422,8 @@ fn appendVerticalBands(
             const curve_max_x = max3(curve.x1, curve.x2, curve.x3);
             if (curve_min_x > band_max_x or curve_max_x < band_min_x) continue;
 
-            try offsets.append(allocator, curve.texel_index % texture_width);
-            try offsets.append(allocator, curve.texel_index / texture_width);
+            try curve_pairs.append(allocator, curve.texel_index % texture_width);
+            try curve_pairs.append(allocator, curve.texel_index / texture_width);
             curve_count += 1;
         }
 
@@ -442,12 +434,31 @@ fn appendVerticalBands(
     }
 }
 
-fn finalizeBandOffsets(state: *BuildState) void {
-    const header_texels = @as(u32, @intCast(state.band_headers.items.len / 2));
+fn appendGlyphBandData(
+    bands_texture: *std.ArrayList(u32),
+    curves: []Curve,
+    band_count: u32,
+    band_dim_x: u32,
+    band_dim_y: u32,
+    allocator: std.mem.Allocator,
+) !void {
+    var headers = std.ArrayList(u32).empty;
+    defer headers.deinit(allocator);
+
+    var curve_pairs = std.ArrayList(u32).empty;
+    defer curve_pairs.deinit(allocator);
+
+    try appendHorizontalBandHeaders(&headers, &curve_pairs, curves, band_count, band_dim_y, allocator);
+    try appendVerticalBandHeaders(&headers, &curve_pairs, curves, band_count, band_dim_x, allocator);
+
+    const header_texel_count = @as(u32, @intCast(headers.items.len / 2));
     var i: usize = 1;
-    while (i < state.band_headers.items.len) : (i += 2) {
-        state.band_headers.items[i] += header_texels;
+    while (i < headers.items.len) : (i += 2) {
+        headers.items[i] += header_texel_count;
     }
+
+    try bands_texture.appendSlice(allocator, headers.items);
+    try bands_texture.appendSlice(allocator, curve_pairs.items);
 }
 
 fn padCurvesTexture(allocator: std.mem.Allocator, floats: []const f32) !struct { []CurveTexel, u32 } {
@@ -473,35 +484,30 @@ fn padCurvesTexture(allocator: std.mem.Allocator, floats: []const f32) !struct {
     return .{ padded, height };
 }
 
-fn padBandsTexture(allocator: std.mem.Allocator, headers: []const u32, offsets: []const u32) !struct { []BandTexel, u32 } {
-    if (headers.len % 2 != 0 or offsets.len % 2 != 0) return error.InvalidBandTexture;
+fn padBandsTexture(allocator: std.mem.Allocator, entries: []const u32) !struct { []BandTexel, u32 } {
+    if (entries.len % 2 != 0) return error.InvalidBandTexture;
 
-    const used_texels = (headers.len + offsets.len) / 2;
+    const used_texels = entries.len / 2;
     const height = @max(@as(u32, 1), divCeil(@as(u32, @intCast(used_texels)), texture_width));
     const padded = try allocator.alloc(BandTexel, height * texture_width);
     @memset(padded, .{ .value = .{ 0, 0 } });
 
     var texel_index: usize = 0;
     var i: usize = 0;
-    while (i < headers.len) : (i += 2) {
-        padded[texel_index] = .{ .value = .{ headers[i], headers[i + 1] } };
-        texel_index += 1;
-    }
-    i = 0;
-    while (i < offsets.len) : (i += 2) {
-        padded[texel_index] = .{ .value = .{ offsets[i], offsets[i + 1] } };
+    while (i < entries.len) : (i += 2) {
+        padded[texel_index] = .{ .value = .{ entries[i], entries[i + 1] } };
         texel_index += 1;
     }
     return .{ padded, height };
 }
 
-fn buildInstances(
+fn buildGeometry(
     allocator: std.mem.Allocator,
     face: c.FT_Face,
     glyphs: *const std.AutoHashMap(u32, Glyph),
     viewport: [2]f32,
     phrase: []const u8,
-) ![]GlyphInstance {
+) !struct { vertices: []SlugVertex, indices: []u32 } {
     var min_x = std.math.inf(f32);
     var min_y = std.math.inf(f32);
     var max_x = -std.math.inf(f32);
@@ -537,8 +543,12 @@ fn buildInstances(
     const origin_x = (viewport[0] - text_width * scale) * 0.5 - min_x * scale;
     const origin_y = (viewport[1] - text_height * scale) * 0.5 - min_y * scale;
 
-    const instances = try allocator.alloc(GlyphInstance, phrase.len);
-    var count: usize = 0;
+    const vertices = try allocator.alloc(SlugVertex, phrase.len * 4);
+    errdefer allocator.free(vertices);
+    const indices = try allocator.alloc(u32, phrase.len * 6);
+    errdefer allocator.free(indices);
+    var vertex_count: usize = 0;
+    var index_count: usize = 0;
     pen_x = 0.0;
     prev_glyph_index = 0;
     have_prev = false;
@@ -551,39 +561,95 @@ fn buildInstances(
         const w = @as(f32, @floatFromInt(glyph.width)) * scale;
         const h = @as(f32, @floatFromInt(glyph.height)) * scale;
 
-        instances[count] = makeInstance(viewport, x, y, w, h, glyph);
-        count += 1;
+        appendGlyphQuad(
+            vertices[vertex_count .. vertex_count + 4],
+            indices[index_count .. index_count + 6],
+            @intCast(vertex_count),
+            x,
+            y,
+            w,
+            h,
+            scale,
+            glyph,
+        );
+        vertex_count += 4;
+        index_count += 6;
         pen_x += glyph.advance;
         prev_glyph_index = glyph.glyph_index;
         have_prev = true;
     }
 
-    return allocator.realloc(instances, count);
+    return .{
+        .vertices = try allocator.realloc(vertices, vertex_count),
+        .indices = try allocator.realloc(indices, index_count),
+    };
 }
 
-fn makeInstance(viewport: [2]f32, x: f32, y: f32, w: f32, h: f32, glyph: Glyph) GlyphInstance {
-    const sx = w / viewport[0];
-    const sy = h / viewport[1];
-    return .{
-        .scale_bias = .{
-            sx,
-            sy,
-            2.0 * (x / viewport[0]) - 1.0 + sx,
-            2.0 * (y / viewport[1]) - 1.0 + sy,
-        },
-        .glyph_band_scale = .{
-            @floatFromInt(glyph.width),
-            @floatFromInt(glyph.height),
-            @as(f32, @floatFromInt(glyph.width)) / @as(f32, @floatFromInt(glyph.band_dim_x)),
-            @as(f32, @floatFromInt(glyph.height)) / @as(f32, @floatFromInt(glyph.band_dim_y)),
-        },
-        .band_data = .{
-            glyph.band_count - 1,
-            glyph.band_count - 1,
-            glyph.bands_tex_coord_x,
-            glyph.bands_tex_coord_y,
-        },
+fn appendGlyphQuad(
+    vertices: []SlugVertex,
+    indices: []u32,
+    base_vertex: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    glyph: Glyph,
+) void {
+    const packed_glyph_loc = packU16x2(glyph.bands_tex_coord_x, glyph.bands_tex_coord_y);
+    const packed_band_max = packU16x2(glyph.band_count - 1, glyph.band_count - 1);
+    const inv_scale = 1.0 / scale;
+    const jac = [4]f32{ inv_scale, 0.0, 0.0, inv_scale };
+    const bnd = [4]f32{
+        1.0 / @as(f32, @floatFromInt(glyph.band_dim_x)),
+        1.0 / @as(f32, @floatFromInt(glyph.band_dim_y)),
+        0.0,
+        0.0,
     };
+    const col = [4]f32{ 0.97, 0.93, 0.85, 1.0 };
+    const glyph_w: f32 = @floatFromInt(glyph.width);
+    const glyph_h: f32 = @floatFromInt(glyph.height);
+
+    vertices[0] = .{
+        .pos = .{ x, y, -1.0, -1.0 },
+        .tex = .{ 0.0, 0.0, packed_glyph_loc, packed_band_max },
+        .jac = jac,
+        .bnd = bnd,
+        .col = col,
+    };
+    vertices[1] = .{
+        .pos = .{ x, y + h, -1.0, 1.0 },
+        .tex = .{ 0.0, glyph_h, packed_glyph_loc, packed_band_max },
+        .jac = jac,
+        .bnd = bnd,
+        .col = col,
+    };
+    vertices[2] = .{
+        .pos = .{ x + w, y + h, 1.0, 1.0 },
+        .tex = .{ glyph_w, glyph_h, packed_glyph_loc, packed_band_max },
+        .jac = jac,
+        .bnd = bnd,
+        .col = col,
+    };
+    vertices[3] = .{
+        .pos = .{ x + w, y, 1.0, -1.0 },
+        .tex = .{ glyph_w, 0.0, packed_glyph_loc, packed_band_max },
+        .jac = jac,
+        .bnd = bnd,
+        .col = col,
+    };
+
+    indices[0] = base_vertex + 0;
+    indices[1] = base_vertex + 1;
+    indices[2] = base_vertex + 2;
+    indices[3] = base_vertex + 0;
+    indices[4] = base_vertex + 2;
+    indices[5] = base_vertex + 3;
+}
+
+fn packU16x2(x: u32, y: u32) f32 {
+    const packed_bits: u32 = (x & 0xFFFF) | ((y & 0xFFFF) << 16);
+    return @bitCast(packed_bits);
 }
 
 fn getKerning(face: c.FT_Face, left_glyph: u32, right_glyph: u32) f32 {

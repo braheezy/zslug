@@ -4,16 +4,16 @@ const zgpu = @import("zgpu");
 const zslug = @import("zslug");
 
 const wgpu = zgpu.wgpu;
-const shader_source = @embedFile("lib/slug_mvp.wgsl");
+const shader_source = @embedFile("lib/slug_real.wgsl");
 
-const QuadVertex = extern struct {
-    position: [2]f32,
-    texcoord: [2]f32,
-};
-
-const GlyphInstance = zslug.slug.GlyphInstance;
+const SlugVertex = zslug.slug.SlugVertex;
 const CurveTexel = zslug.slug.CurveTexel;
 const BandTexel = zslug.slug.BandTexel;
+
+const Uniforms = extern struct {
+    slug_matrix: [4][4]f32,
+    slug_viewport: [4]f32,
+};
 
 const App = @This();
 allocator: std.mem.Allocator,
@@ -22,13 +22,14 @@ gfx: *zgpu.GraphicsContext,
 scene: zslug.slug.Scene,
 pipeline: zgpu.RenderPipelineHandle = .{},
 bind_group: zgpu.BindGroupHandle = .{},
-quad_buffer: zgpu.BufferHandle = .{},
-instance_buffer: zgpu.BufferHandle = .{},
+vertex_buffer: zgpu.BufferHandle = .{},
+index_buffer: zgpu.BufferHandle = .{},
 curve_texture: zgpu.TextureHandle = .{},
 curve_view: zgpu.TextureViewHandle = .{},
 band_texture: zgpu.TextureHandle = .{},
 band_view: zgpu.TextureViewHandle = .{},
-instance_count: u32 = 0,
+index_count: u32 = 0,
+uniform_offset: u32 = 0,
 
 pub fn init(allocator: std.mem.Allocator) !*App {
     try zglfw.init();
@@ -77,8 +78,8 @@ pub fn deinit(self: *App) void {
     self.gfx.destroyResource(self.band_texture);
     self.gfx.releaseResource(self.curve_view);
     self.gfx.destroyResource(self.curve_texture);
-    self.gfx.destroyResource(self.instance_buffer);
-    self.gfx.destroyResource(self.quad_buffer);
+    self.gfx.destroyResource(self.index_buffer);
+    self.gfx.destroyResource(self.vertex_buffer);
     self.scene.deinit();
     self.gfx.destroy(self.allocator);
     zglfw.destroyWindow(self.window);
@@ -90,8 +91,22 @@ pub fn isRunning(self: *App) bool {
     return !self.window.shouldClose() and self.window.getKey(.escape) != .press;
 }
 
-pub fn update(_: *App) void {
+pub fn update(self: *App) void {
     zglfw.pollEvents();
+
+    const width = @as(f32, @floatFromInt(self.gfx.width));
+    const height = @as(f32, @floatFromInt(self.gfx.height));
+    const mem = self.gfx.uniformsAllocate(Uniforms, 1);
+    mem.slice[0] = .{
+        .slug_matrix = .{
+            .{ 2.0 / width, 0.0, 0.0, -1.0 },
+            .{ 0.0, 2.0 / height, 0.0, -1.0 },
+            .{ 0.0, 0.0, 0.0, 0.0 },
+            .{ 0.0, 0.0, 0.0, 1.0 },
+        },
+        .slug_viewport = .{ width, height, 0.0, 0.0 },
+    };
+    self.uniform_offset = mem.offset;
 }
 
 pub fn draw(self: *App) void {
@@ -104,8 +119,8 @@ pub fn draw(self: *App) void {
 
         const pipeline = self.gfx.lookupResource(self.pipeline) orelse break :commands encoder.finish(null);
         const bind_group = self.gfx.lookupResource(self.bind_group) orelse break :commands encoder.finish(null);
-        const quad_buffer = self.gfx.lookupResource(self.quad_buffer) orelse break :commands encoder.finish(null);
-        const instance_info = self.gfx.lookupResourceInfo(self.instance_buffer) orelse break :commands encoder.finish(null);
+        const vertex_info = self.gfx.lookupResourceInfo(self.vertex_buffer) orelse break :commands encoder.finish(null);
+        const index_info = self.gfx.lookupResourceInfo(self.index_buffer) orelse break :commands encoder.finish(null);
 
         {
             const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
@@ -124,23 +139,25 @@ pub fn draw(self: *App) void {
             }
 
             pass.setPipeline(pipeline);
-            pass.setBindGroup(0, bind_group, &.{});
-            pass.setVertexBuffer(0, quad_buffer, 0, 6 * @sizeOf(QuadVertex));
-            pass.setVertexBuffer(1, instance_info.gpuobj.?, 0, instance_info.size);
-            pass.draw(6, self.instance_count, 0, 0);
+            pass.setBindGroup(0, bind_group, &.{self.uniform_offset});
+            pass.setVertexBuffer(0, vertex_info.gpuobj.?, 0, vertex_info.size);
+            pass.setIndexBuffer(index_info.gpuobj.?, .uint32, 0, index_info.size);
+            pass.drawIndexed(self.index_count, 1, 0, 0, 0);
         }
 
         break :commands encoder.finish(null);
     };
     defer commands.release();
+
     self.gfx.submit(&.{commands});
     _ = self.gfx.present();
 }
 
 fn createResources(self: *App) !void {
     const bind_group_layout = self.gfx.createBindGroupLayout(&.{
+        zgpu.bufferEntry(0, wgpu.ShaderStages.vertex, .uniform, true, 0),
         .{
-            .binding = 0,
+            .binding = 1,
             .visibility = wgpu.ShaderStages.fragment,
             .texture = .{
                 .sample_type = .unfilterable_float,
@@ -149,7 +166,7 @@ fn createResources(self: *App) !void {
             },
         },
         .{
-            .binding = 1,
+            .binding = 2,
             .visibility = wgpu.ShaderStages.fragment,
             .texture = .{
                 .sample_type = .uint,
@@ -163,7 +180,7 @@ fn createResources(self: *App) !void {
     const pipeline_layout = self.gfx.createPipelineLayout(&.{bind_group_layout});
     defer self.gfx.releaseResource(pipeline_layout);
 
-    const shader = zgpu.createWgslShaderModule(self.gfx.device, shader_source, "slug");
+    const shader = zgpu.createWgslShaderModule(self.gfx.device, shader_source, "slug-real");
     defer shader.release();
 
     const color_targets = [_]wgpu.ColorTargetState{.{
@@ -183,29 +200,19 @@ fn createResources(self: *App) !void {
         .write_mask = wgpu.ColorWriteMasks.all,
     }};
 
-    const quad_attributes = [_]wgpu.VertexAttribute{
-        .{ .format = .float32x2, .offset = 0, .shader_location = 0 },
-        .{ .format = .float32x2, .offset = @offsetOf(QuadVertex, "texcoord"), .shader_location = 1 },
+    const vertex_attributes = [_]wgpu.VertexAttribute{
+        .{ .format = .float32x4, .offset = @offsetOf(SlugVertex, "pos"), .shader_location = 0 },
+        .{ .format = .float32x4, .offset = @offsetOf(SlugVertex, "tex"), .shader_location = 1 },
+        .{ .format = .float32x4, .offset = @offsetOf(SlugVertex, "jac"), .shader_location = 2 },
+        .{ .format = .float32x4, .offset = @offsetOf(SlugVertex, "bnd"), .shader_location = 3 },
+        .{ .format = .float32x4, .offset = @offsetOf(SlugVertex, "col"), .shader_location = 4 },
     };
-    const instance_attributes = [_]wgpu.VertexAttribute{
-        .{ .format = .float32x4, .offset = @offsetOf(GlyphInstance, "scale_bias"), .shader_location = 2 },
-        .{ .format = .float32x4, .offset = @offsetOf(GlyphInstance, "glyph_band_scale"), .shader_location = 3 },
-        .{ .format = .uint32x4, .offset = @offsetOf(GlyphInstance, "band_data"), .shader_location = 4 },
-    };
-    const vertex_buffers = [_]wgpu.VertexBufferLayout{
-        .{
-            .array_stride = @sizeOf(QuadVertex),
-            .step_mode = .vertex,
-            .attribute_count = quad_attributes.len,
-            .attributes = &quad_attributes,
-        },
-        .{
-            .array_stride = @sizeOf(GlyphInstance),
-            .step_mode = .instance,
-            .attribute_count = instance_attributes.len,
-            .attributes = &instance_attributes,
-        },
-    };
+    const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
+        .array_stride = @sizeOf(SlugVertex),
+        .step_mode = .vertex,
+        .attribute_count = vertex_attributes.len,
+        .attributes = &vertex_attributes,
+    }};
 
     self.pipeline = self.gfx.createRenderPipeline(pipeline_layout, .{
         .vertex = .{
@@ -227,26 +234,18 @@ fn createResources(self: *App) !void {
         },
     });
 
-    const quad_vertices = [_]QuadVertex{
-        .{ .position = .{ -1.0, -1.0 }, .texcoord = .{ 0.0, 0.0 } },
-        .{ .position = .{ -1.0, 1.0 }, .texcoord = .{ 0.0, 1.0 } },
-        .{ .position = .{ 1.0, 1.0 }, .texcoord = .{ 1.0, 1.0 } },
-        .{ .position = .{ -1.0, -1.0 }, .texcoord = .{ 0.0, 0.0 } },
-        .{ .position = .{ 1.0, 1.0 }, .texcoord = .{ 1.0, 1.0 } },
-        .{ .position = .{ 1.0, -1.0 }, .texcoord = .{ 1.0, 0.0 } },
-    };
-    self.quad_buffer = self.gfx.createBuffer(.{
+    self.vertex_buffer = self.gfx.createBuffer(.{
         .usage = wgpu.BufferUsages.copy_dst | wgpu.BufferUsages.vertex,
-        .size = quad_vertices.len * @sizeOf(QuadVertex),
+        .size = self.scene.vertices.len * @sizeOf(SlugVertex),
     });
-    self.gfx.queue.writeBuffer(self.gfx.lookupResource(self.quad_buffer).?, 0, QuadVertex, &quad_vertices);
+    self.gfx.queue.writeBuffer(self.gfx.lookupResource(self.vertex_buffer).?, 0, SlugVertex, self.scene.vertices);
 
-    self.instance_count = @intCast(self.scene.instances.len);
-    self.instance_buffer = self.gfx.createBuffer(.{
-        .usage = wgpu.BufferUsages.copy_dst | wgpu.BufferUsages.vertex,
-        .size = self.scene.instances.len * @sizeOf(GlyphInstance),
+    self.index_count = @intCast(self.scene.indices.len);
+    self.index_buffer = self.gfx.createBuffer(.{
+        .usage = wgpu.BufferUsages.copy_dst | wgpu.BufferUsages.index,
+        .size = self.scene.indices.len * @sizeOf(u32),
     });
-    self.gfx.queue.writeBuffer(self.gfx.lookupResource(self.instance_buffer).?, 0, GlyphInstance, self.scene.instances);
+    self.gfx.queue.writeBuffer(self.gfx.lookupResource(self.index_buffer).?, 0, u32, self.scene.indices);
 
     self.curve_texture = self.gfx.createTexture(.{
         .usage = wgpu.TextureUsages.copy_dst | wgpu.TextureUsages.texture_binding,
@@ -305,7 +304,13 @@ fn createResources(self: *App) !void {
     );
 
     self.bind_group = self.gfx.createBindGroup(bind_group_layout, &.{
-        .{ .binding = 0, .texture_view_handle = self.curve_view },
-        .{ .binding = 1, .texture_view_handle = self.band_view },
+        .{
+            .binding = 0,
+            .buffer_handle = self.gfx.uniforms.buffer,
+            .offset = 0,
+            .size = @sizeOf(Uniforms),
+        },
+        .{ .binding = 1, .texture_view_handle = self.curve_view },
+        .{ .binding = 2, .texture_view_handle = self.band_view },
     });
 }
