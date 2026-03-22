@@ -1,1 +1,10 @@
 pub const slug = @import("slug_builder.zig");
+pub const font_backend = @import("font_backend.zig");
+pub const font_model = @import("font_model.zig");
+pub const glyph_parity = @import("glyph_parity.zig");
+pub const native_generator = @import("native_generator.zig");
+pub const runtime_font = @import("runtime_font.zig");
+pub const slug_parse = @import("slug_parse.zig");
+pub const text_render = @import("text_render.zig");
+pub const text_runtime = @import("text_runtime.zig");
+pub const text_shape = @import("text_shape.zig");

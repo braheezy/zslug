@@ -1,4 +1,7 @@
 const std = @import("std");
+const build_options = @import("build_options");
+const font_backend = @import("font_backend.zig");
+const runtime = @import("runtime_font.zig");
 
 const c = @cImport({
     @cInclude("ft2build.h");
@@ -7,15 +10,9 @@ const c = @cImport({
 });
 
 pub const texture_width: u32 = 4096;
-const default_phrase = "Meow?!";
 
-pub const CurveTexel = extern struct {
-    value: [4]f32,
-};
-
-pub const BandTexel = extern struct {
-    value: [2]u32,
-};
+pub const CurveTexel = runtime.CurveTexel;
+pub const BandTexel = runtime.BandTexel;
 
 pub const GlyphInstance = extern struct {
     scale_bias: [4]f32,
@@ -23,32 +20,12 @@ pub const GlyphInstance = extern struct {
     band_data: [4]u32,
 };
 
-pub const SlugVertex = extern struct {
-    pos: [4]f32,
-    tex: [4]f32,
-    jac: [4]f32,
-    bnd: [4]f32,
-    col: [4]f32,
-};
-
-pub const Scene = struct {
-    allocator: std.mem.Allocator,
-    curves_width: u32,
-    curves_height: u32,
-    curves_texels: []CurveTexel,
-    bands_width: u32,
-    bands_height: u32,
-    bands_texels: []BandTexel,
-    vertices: []SlugVertex,
-    indices: []u32,
-
-    pub fn deinit(self: *Scene) void {
-        self.allocator.free(self.curves_texels);
-        self.allocator.free(self.bands_texels);
-        self.allocator.free(self.vertices);
-        self.allocator.free(self.indices);
-        self.* = undefined;
-    }
+pub const SlugVertex = runtime.SlugVertex;
+pub const Scene = runtime.Scene;
+const LayoutGlyph = runtime.LayoutGlyph;
+const ResolvedPath = struct {
+    value: []const u8,
+    owned: bool,
 };
 
 const Curve = struct {
@@ -62,6 +39,8 @@ const Curve = struct {
     first: bool = false,
 };
 
+const Point = runtime.Point;
+
 const Glyph = struct {
     codepoint: u32,
     glyph_index: u32,
@@ -74,11 +53,15 @@ const Glyph = struct {
     bands_tex_coord_y: u32,
     bbox_min: [2]f32,
     advance: f32,
+    polygon: []Point,
 };
+
+const SlugGlyph = runtime.RuntimeGlyph;
 
 const OutlineBuilder = struct {
     allocator: std.mem.Allocator,
     curves: std.ArrayList(Curve) = .empty,
+    contour_starts: std.ArrayList(usize) = .empty,
     bbox_min: [2]f32,
     current: Curve = .{
         .x1 = 0.0,
@@ -94,9 +77,14 @@ const OutlineBuilder = struct {
 
     fn deinit(self: *OutlineBuilder) void {
         self.curves.deinit(self.allocator);
+        self.contour_starts.deinit(self.allocator);
     }
 
     fn moveTo(self: *OutlineBuilder, x: f32, y: f32) void {
+        self.contour_starts.append(self.allocator, self.curves.items.len) catch {
+            self.failed = true;
+            return;
+        };
         self.current.first = true;
         self.current.x3 = x - self.bbox_min[0];
         self.current.y3 = y - self.bbox_min[1];
@@ -111,8 +99,8 @@ const OutlineBuilder = struct {
         curve.y1 = self.current.y3;
         curve.x3 = x - self.bbox_min[0];
         curve.y3 = y - self.bbox_min[1];
-        curve.x2 = @floor((curve.x1 + curve.x3) * 0.5);
-        curve.y2 = @floor((curve.y1 + curve.y3) * 0.5);
+        curve.x2 = (curve.x1 + curve.x3) * 0.5;
+        curve.y2 = (curve.y1 + curve.y3) * 0.5;
         self.curves.append(self.allocator, curve) catch {
             self.failed = true;
             return;
@@ -149,6 +137,10 @@ const BuildState = struct {
     band_count_limit: u32 = 16,
 
     fn deinit(self: *BuildState) void {
+        var it = self.glyphs.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.polygon);
+        }
         self.curves_texture.deinit(self.allocator);
         self.bands_texture.deinit(self.allocator);
         self.glyphs.deinit();
@@ -156,14 +148,53 @@ const BuildState = struct {
 };
 
 pub fn buildDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
+    return buildDemoSceneFromSlug(allocator, viewport);
+}
+
+fn buildDemoSceneFromSlug(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
+    const backend = font_backend.defaultBackend();
+    const slug_path = if (backend == .slug_reference) try findSlugPath(allocator) else null;
+    defer if (slug_path) |path| allocator.free(path);
+    const font_path = if (backend == .native_generator) try findFontPath(allocator) else null;
+    defer if (font_path) |path| if (path.owned) allocator.free(path.value);
+
+    var runtime_font = try font_backend.loadRuntimeFont(allocator, .{
+        .text = build_options.demo_text,
+        .slug_path = slug_path,
+        .font_path = if (font_path) |path| path.value else null,
+        .backend = backend,
+    });
+    errdefer runtime_font.deinit();
+
+    const geometry = try buildSlugGeometry(allocator, &runtime_font.glyphs, runtime_font.layout_glyphs, viewport);
+    errdefer allocator.free(geometry.vertices);
+    errdefer allocator.free(geometry.indices);
+
+    allocator.free(runtime_font.layout_glyphs);
+    runtime_font.glyphs.deinit();
+
+    return .{
+        .allocator = allocator,
+        .curves_width = runtime_font.curves_width,
+        .curves_height = runtime_font.curves_height,
+        .curves_texels = runtime_font.curves_texels,
+        .bands_width = runtime_font.bands_width,
+        .bands_height = runtime_font.bands_height,
+        .bands_texels = runtime_font.bands_texels,
+        .vertices = geometry.vertices,
+        .indices = geometry.indices,
+    };
+}
+
+fn buildFreeTypeDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
     var ft_library: c.FT_Library = undefined;
     if (c.FT_Init_FreeType(&ft_library) != 0) return error.FreeTypeInitFailed;
     defer _ = c.FT_Done_FreeType(ft_library);
 
     const font_path = try findFontPath(allocator);
-    defer if (!isStaticPath(font_path)) allocator.free(font_path);
+    defer if (font_path.owned) allocator.free(font_path.value);
 
-    const font_path_z = try allocator.dupeZ(u8, font_path);
+    const font_path_z = try allocator.dupeZ(u8, font_path.value);
     defer allocator.free(font_path_z);
 
     var face: c.FT_Face = undefined;
@@ -177,8 +208,9 @@ pub fn buildDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
     };
     defer state.deinit();
 
-    for (default_phrase) |ch| {
-        const codepoint: u32 = ch;
+    var phrase_view = try std.unicode.Utf8View.init(build_options.demo_text);
+    var phrase_iter = phrase_view.iterator();
+    while (phrase_iter.nextCodepoint()) |codepoint| {
         if (state.glyphs.contains(codepoint)) continue;
         const glyph = try processCodepoint(&state, codepoint);
         try state.glyphs.put(codepoint, glyph);
@@ -189,7 +221,7 @@ pub fn buildDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
     errdefer allocator.free(curves_texels);
     errdefer allocator.free(bands_texels);
 
-    const geometry = try buildGeometry(allocator, face, &state.glyphs, viewport, default_phrase);
+    const geometry = try buildGeometry(allocator, face, &state.glyphs, viewport, build_options.demo_text);
     errdefer allocator.free(geometry.vertices);
     errdefer allocator.free(geometry.indices);
 
@@ -261,14 +293,22 @@ fn processCodepoint(state: *BuildState, codepoint: u32) !Glyph {
     const size_x = width + 1;
     const size_y = height + 1;
 
-    var band_count = state.band_count_limit;
-    if (size_x < band_count or size_y < band_count) {
-        band_count = @max(@as(u32, 1), @min(size_x, size_y) / 2);
-    }
+    // For correctness in the demo, use a single full-glyph band in each direction.
+    // This disables the band subdivision optimization and avoids missing-curve artifacts
+    // caused by our current band builder.
+    const band_count: u32 = 1;
 
     const band_dim_y = divCeil(size_y, band_count);
     const band_dim_x = divCeil(size_x, band_count);
     try appendGlyphBandData(&state.bands_texture, outline_builder.curves.items, band_count, band_dim_x, band_dim_y, state.allocator);
+
+    const polygon = try buildGlyphPolygon(
+        state.allocator,
+        outline_builder.curves.items,
+        outline_builder.contour_starts.items,
+        width,
+        height,
+    );
 
     return .{
         .codepoint = codepoint,
@@ -282,6 +322,7 @@ fn processCodepoint(state: *BuildState, codepoint: u32) !Glyph {
         .bands_tex_coord_y = bands_texel_index / texture_width,
         .bbox_min = bbox_min,
         .advance = @floatFromInt(metrics.horiAdvance),
+        .polygon = polygon,
     };
 }
 
@@ -516,8 +557,10 @@ fn buildGeometry(
     var pen_x: f32 = 0.0;
     var prev_glyph_index: u32 = 0;
     var have_prev = false;
-    for (phrase) |ch| {
-        const glyph = glyphs.get(ch) orelse continue;
+    var phrase_view = try std.unicode.Utf8View.init(phrase);
+    var phrase_iter = phrase_view.iterator();
+    while (phrase_iter.nextCodepoint()) |codepoint| {
+        const glyph = glyphs.get(codepoint) orelse continue;
         if (have_prev) pen_x += getKerning(face, prev_glyph_index, glyph.glyph_index);
 
         const x0 = pen_x + glyph.bbox_min[0];
@@ -543,32 +586,36 @@ fn buildGeometry(
     const origin_x = (viewport[0] - text_width * scale) * 0.5 - min_x * scale;
     const origin_y = (viewport[1] - text_height * scale) * 0.5 - min_y * scale;
 
-    const vertices = try allocator.alloc(SlugVertex, phrase.len * 4);
+    var glyph_count: usize = 0;
+    phrase_view = try std.unicode.Utf8View.init(phrase);
+    phrase_iter = phrase_view.iterator();
+    while (phrase_iter.nextCodepoint()) |codepoint| {
+        if (glyphs.get(codepoint) != null) glyph_count += 1;
+    }
+
+    const vertices = try allocator.alloc(SlugVertex, glyph_count * 4);
     errdefer allocator.free(vertices);
-    const indices = try allocator.alloc(u32, phrase.len * 6);
+    const indices = try allocator.alloc(u32, glyph_count * 6);
     errdefer allocator.free(indices);
     var vertex_count: usize = 0;
     var index_count: usize = 0;
     pen_x = 0.0;
     prev_glyph_index = 0;
     have_prev = false;
-    for (phrase) |ch| {
-        const glyph = glyphs.get(ch) orelse continue;
+    phrase_view = try std.unicode.Utf8View.init(phrase);
+    phrase_iter = phrase_view.iterator();
+    while (phrase_iter.nextCodepoint()) |codepoint| {
+        const glyph = glyphs.get(codepoint) orelse continue;
         if (have_prev) pen_x += getKerning(face, prev_glyph_index, glyph.glyph_index);
 
         const x = origin_x + (pen_x + glyph.bbox_min[0]) * scale;
         const y = origin_y + glyph.bbox_min[1] * scale;
-        const w = @as(f32, @floatFromInt(glyph.width)) * scale;
-        const h = @as(f32, @floatFromInt(glyph.height)) * scale;
-
         appendGlyphQuad(
             vertices[vertex_count .. vertex_count + 4],
             indices[index_count .. index_count + 6],
             @intCast(vertex_count),
             x,
             y,
-            w,
-            h,
             scale,
             glyph,
         );
@@ -591,8 +638,6 @@ fn appendGlyphQuad(
     base_vertex: u32,
     x: f32,
     y: f32,
-    w: f32,
-    h: f32,
     scale: f32,
     glyph: Glyph,
 ) void {
@@ -618,21 +663,21 @@ fn appendGlyphQuad(
         .col = col,
     };
     vertices[1] = .{
-        .pos = .{ x, y + h, -1.0, 1.0 },
+        .pos = .{ x, y + glyph_h * scale, -1.0, 1.0 },
         .tex = .{ 0.0, glyph_h, packed_glyph_loc, packed_band_max },
         .jac = jac,
         .bnd = bnd,
         .col = col,
     };
     vertices[2] = .{
-        .pos = .{ x + w, y + h, 1.0, 1.0 },
+        .pos = .{ x + glyph_w * scale, y + glyph_h * scale, 1.0, 1.0 },
         .tex = .{ glyph_w, glyph_h, packed_glyph_loc, packed_band_max },
         .jac = jac,
         .bnd = bnd,
         .col = col,
     };
     vertices[3] = .{
-        .pos = .{ x + w, y, 1.0, -1.0 },
+        .pos = .{ x + glyph_w * scale, y, 1.0, -1.0 },
         .tex = .{ glyph_w, 0.0, packed_glyph_loc, packed_band_max },
         .jac = jac,
         .bnd = bnd,
@@ -647,9 +692,410 @@ fn appendGlyphQuad(
     indices[5] = base_vertex + 3;
 }
 
+fn buildSlugGeometry(
+    allocator: std.mem.Allocator,
+    glyphs: *const std.AutoHashMap(u32, SlugGlyph),
+    layout_glyphs: []const LayoutGlyph,
+    viewport: [2]f32,
+) !struct { vertices: []SlugVertex, indices: []u32 } {
+    var min_x = std.math.inf(f32);
+    var min_y = std.math.inf(f32);
+    var max_x = -std.math.inf(f32);
+    var max_y = -std.math.inf(f32);
+
+    var pen_x: f32 = 0.0;
+    var glyph_count: usize = 0;
+    for (layout_glyphs) |layout_glyph| {
+        const glyph = glyphs.get(layout_glyph.glyph_index) orelse continue;
+        if (glyph.visible) {
+            const x0 = pen_x + layout_glyph.offset[0] + glyph.glyph_offset[0] + glyph.bbox[0];
+            const x1 = pen_x + layout_glyph.offset[0] + glyph.glyph_offset[0] + glyph.bbox[2];
+            const y0 = layout_glyph.offset[1] + glyph.glyph_offset[1] + glyph.bbox[1];
+            const y1 = layout_glyph.offset[1] + glyph.glyph_offset[1] + glyph.bbox[3];
+
+            min_x = @min(min_x, x0);
+            min_y = @min(min_y, y0);
+            max_x = @max(max_x, x1);
+            max_y = @max(max_y, y1);
+            glyph_count += 1;
+        }
+        pen_x += layout_glyph.advance[0];
+    }
+
+    const text_width = max_x - min_x;
+    const text_height = max_y - min_y;
+    if (glyph_count == 0 or text_width <= 0.0 or text_height <= 0.0) return error.EmptyLayout;
+
+    const scale = @min(viewport[0] * 0.8 / text_width, viewport[1] * 0.5 / text_height);
+    const origin_x = (viewport[0] - text_width * scale) * 0.5 - min_x * scale;
+    const origin_y = (viewport[1] - text_height * scale) * 0.5 - min_y * scale;
+
+    var total_vertex_count: usize = 0;
+    var total_index_count: usize = 0;
+    for (layout_glyphs) |layout_glyph| {
+        const glyph = glyphs.get(layout_glyph.glyph_index) orelse continue;
+        if (!glyph.visible) continue;
+        const polygon_count = glyphPolygonCount(glyph);
+        total_vertex_count += polygon_count;
+        total_index_count += (polygon_count - 2) * 3;
+    }
+
+    const vertices = try allocator.alloc(SlugVertex, total_vertex_count);
+    errdefer allocator.free(vertices);
+    const indices = try allocator.alloc(u32, total_index_count);
+    errdefer allocator.free(indices);
+
+    var vertex_count: usize = 0;
+    var index_count: usize = 0;
+    pen_x = 0.0;
+    for (layout_glyphs) |layout_glyph| {
+        const glyph = glyphs.get(layout_glyph.glyph_index) orelse continue;
+        if (glyph.visible) {
+            const polygon_count = glyphPolygonCount(glyph);
+            appendSlugGlyphPolygon(
+                vertices[vertex_count .. vertex_count + polygon_count],
+                indices[index_count .. index_count + (polygon_count - 2) * 3],
+                @intCast(vertex_count),
+                origin_x,
+                origin_y,
+                pen_x,
+                layout_glyph,
+                scale,
+                glyph,
+            );
+            vertex_count += polygon_count;
+            index_count += (polygon_count - 2) * 3;
+        }
+        pen_x += layout_glyph.advance[0];
+    }
+
+    return .{
+        .vertices = try allocator.realloc(vertices, vertex_count),
+        .indices = try allocator.realloc(indices, index_count),
+    };
+}
+
+fn appendSlugGlyphPolygon(
+    vertices: []SlugVertex,
+    indices: []u32,
+    base_vertex: u32,
+    origin_x: f32,
+    origin_y: f32,
+    pen_x: f32,
+    layout_glyph: LayoutGlyph,
+    scale: f32,
+    glyph: SlugGlyph,
+) void {
+    const packed_glyph_loc = packU16x2(glyph.band_location[0], glyph.band_location[1]);
+    const packed_band_max = packU16x2(glyph.band_count[0] - 1, glyph.band_count[1] - 1);
+    const inv_scale = 1.0 / scale;
+    const jac = [4]f32{ inv_scale, 0.0, 0.0, inv_scale };
+    const bnd = [4]f32{
+        glyph.band_scale[0],
+        glyph.band_scale[1],
+        -glyph.bbox[0] * glyph.band_scale[0],
+        -glyph.bbox[1] * glyph.band_scale[1],
+    };
+    const col = [4]f32{ 0.97, 0.93, 0.85, 1.0 };
+
+    const fallback = fallbackSlugQuad(glyph.bbox);
+    const polygon = if (glyph.polygon_count >= 3)
+        glyph.polygon_points[0..glyph.polygon_count]
+    else
+        fallback[0..];
+    const winding: f32 = if (signedPolygonArea(polygon) >= 0.0) 1.0 else -1.0;
+    for (polygon, 0..) |point, i| {
+        const prev = polygon[(i + polygon.len - 1) % polygon.len];
+        const next = polygon[(i + 1) % polygon.len];
+        const normal = polygonVertexNormal(prev, point, next, winding);
+        vertices[i] = .{
+            .pos = .{
+                origin_x + (pen_x + layout_glyph.offset[0] + glyph.glyph_offset[0] + point[0]) * scale,
+                origin_y + (layout_glyph.offset[1] + glyph.glyph_offset[1] + point[1]) * scale,
+                normal[0],
+                normal[1],
+            },
+            .tex = .{ point[0], point[1], packed_glyph_loc, packed_band_max },
+            .jac = jac,
+            .bnd = bnd,
+            .col = col,
+        };
+    }
+
+    var index_pos: usize = 0;
+    triangulatePolygon(indices, &index_pos, base_vertex, polygon);
+}
+
+fn glyphPolygonCount(glyph: SlugGlyph) usize {
+    if (glyph.polygon_count >= 3) return glyph.polygon_count;
+    return 4;
+}
+
+fn fallbackSlugQuad(bbox: [4]f32) [4]Point {
+    return .{
+        .{ bbox[0], bbox[1] },
+        .{ bbox[0], bbox[3] },
+        .{ bbox[2], bbox[3] },
+        .{ bbox[2], bbox[1] },
+    };
+}
+
 fn packU16x2(x: u32, y: u32) f32 {
     const packed_bits: u32 = (x & 0xFFFF) | ((y & 0xFFFF) << 16);
     return @bitCast(packed_bits);
+}
+
+fn buildGlyphPolygon(
+    allocator: std.mem.Allocator,
+    curves: []const Curve,
+    _: []const usize,
+    width: u32,
+    height: u32,
+) ![]Point {
+    if (curves.len == 0) {
+        return allocator.dupe(Point, &fallbackQuadPolygon(width, height));
+    }
+
+    const w: f32 = @floatFromInt(width);
+    const h: f32 = @floatFromInt(height);
+
+    const clip_bl = chooseCornerClip(curves, w, h, .bottom_left);
+    const clip_tl = chooseCornerClip(curves, w, h, .top_left);
+    const clip_tr = chooseCornerClip(curves, w, h, .top_right);
+    const clip_br = chooseCornerClip(curves, w, h, .bottom_right);
+
+    var points = std.ArrayList(Point).empty;
+    defer points.deinit(allocator);
+
+    try appendSequentialPoint(&points, allocator, if (clip_bl) |clip| clip.edge0 else .{ 0.0, 0.0 });
+    if (clip_tl) |clip| {
+        try appendSequentialPoint(&points, allocator, clip.edge0);
+        try appendSequentialPoint(&points, allocator, clip.edge1);
+    } else {
+        try appendSequentialPoint(&points, allocator, .{ 0.0, h });
+    }
+    if (clip_tr) |clip| {
+        try appendSequentialPoint(&points, allocator, clip.edge0);
+        try appendSequentialPoint(&points, allocator, clip.edge1);
+    } else {
+        try appendSequentialPoint(&points, allocator, .{ w, h });
+    }
+    if (clip_br) |clip| {
+        try appendSequentialPoint(&points, allocator, clip.edge0);
+        try appendSequentialPoint(&points, allocator, clip.edge1);
+    } else {
+        try appendSequentialPoint(&points, allocator, .{ w, 0.0 });
+    }
+    if (clip_bl) |clip| {
+        try appendSequentialPoint(&points, allocator, clip.edge1);
+    }
+
+    if (points.items.len > 1 and pointNear(points.items[0], points.items[points.items.len - 1])) {
+        _ = points.pop();
+    }
+    if (points.items.len < 3 or polygonArea(points.items) < 1.0) {
+        return allocator.dupe(Point, &fallbackQuadPolygon(width, height));
+    }
+    return allocator.dupe(Point, points.items);
+}
+
+const Corner = enum {
+    bottom_left,
+    top_left,
+    top_right,
+    bottom_right,
+};
+
+const CornerClip = struct {
+    edge0: Point,
+    edge1: Point,
+    area: f32,
+};
+
+fn chooseCornerClip(curves: []const Curve, width: f32, height: f32, corner: Corner) ?CornerClip {
+    const candidates = [_][2]f32{
+        .{ 1.0, 4.0 },
+        .{ 1.0, 2.0 },
+        .{ 1.0, 1.0 },
+        .{ 2.0, 1.0 },
+        .{ 4.0, 1.0 },
+    };
+
+    var best: ?CornerClip = null;
+    for (candidates) |pair| {
+        const sx: f32 = switch (corner) {
+            .bottom_left, .top_left => -1.0,
+            .top_right, .bottom_right => 1.0,
+        };
+        const sy: f32 = switch (corner) {
+            .bottom_left, .bottom_right => -1.0,
+            .top_left, .top_right => 1.0,
+        };
+        const normal = Point{ sx * pair[0], sy * pair[1] };
+        if (makeCornerClip(curves, width, height, corner, normal)) |clip| {
+            if (best == null or clip.area > best.?.area) {
+                best = clip;
+            }
+        }
+    }
+    return best;
+}
+
+fn makeCornerClip(
+    curves: []const Curve,
+    width: f32,
+    height: f32,
+    corner: Corner,
+    normal: Point,
+) ?CornerClip {
+    const h = maxControlDot(curves, normal);
+    const eps = 1.0e-3;
+    switch (corner) {
+        .bottom_left => {
+            if (h >= -eps) return null;
+            const x = h / normal[0];
+            const y = h / normal[1];
+            if (x <= eps or x >= width - eps or y <= eps or y >= height - eps) return null;
+            return .{
+                .edge0 = .{ 0.0, y },
+                .edge1 = .{ x, 0.0 },
+                .area = 0.5 * x * y,
+            };
+        },
+        .top_left => {
+            const y = h / normal[1];
+            const x = (normal[1] * height - h) / -normal[0];
+            if (x <= eps or x >= width - eps or y <= eps or y >= height - eps) return null;
+            return .{
+                .edge0 = .{ 0.0, y },
+                .edge1 = .{ x, height },
+                .area = 0.5 * x * (height - y),
+            };
+        },
+        .top_right => {
+            const x = (h - normal[1] * height) / normal[0];
+            const y = (h - normal[0] * width) / normal[1];
+            if (x <= eps or x >= width - eps or y <= eps or y >= height - eps) return null;
+            return .{
+                .edge0 = .{ x, height },
+                .edge1 = .{ width, y },
+                .area = 0.5 * (width - x) * (height - y),
+            };
+        },
+        .bottom_right => {
+            const x = h / normal[0];
+            const y = (h - normal[0] * width) / normal[1];
+            if (x <= eps or x >= width - eps or y <= eps or y >= height - eps) return null;
+            return .{
+                .edge0 = .{ width, y },
+                .edge1 = .{ x, 0.0 },
+                .area = 0.5 * (width - x) * y,
+            };
+        },
+    }
+}
+
+fn maxControlDot(curves: []const Curve, normal: Point) f32 {
+    var max_dot = -std.math.inf(f32);
+    for (curves) |curve| {
+        const p1 = Point{ curve.x1, curve.y1 };
+        const p2 = Point{ curve.x2, curve.y2 };
+        const p3 = Point{ curve.x3, curve.y3 };
+        max_dot = @max(max_dot, dot2(p1, normal));
+        max_dot = @max(max_dot, dot2(p2, normal));
+        max_dot = @max(max_dot, dot2(p3, normal));
+    }
+    return max_dot;
+}
+
+fn dot2(a: Point, b: Point) f32 {
+    return a[0] * b[0] + a[1] * b[1];
+}
+
+fn appendSequentialPoint(list: *std.ArrayList(Point), allocator: std.mem.Allocator, point: Point) !void {
+    if (list.items.len > 0 and pointNear(list.items[list.items.len - 1], point)) return;
+    try list.append(allocator, point);
+}
+
+fn pointNear(a: Point, b: Point) bool {
+    return @abs(a[0] - b[0]) < 0.01 and @abs(a[1] - b[1]) < 0.01;
+}
+
+fn cross(a: Point, b: Point, c_: Point) f32 {
+    return (b[0] - a[0]) * (c_[1] - a[1]) - (b[1] - a[1]) * (c_[0] - a[0]);
+}
+
+fn quadraticExtremumT(a: f32, b: f32, c_: f32) ?f32 {
+    const denom = a - 2.0 * b + c_;
+    if (@abs(denom) < 1.0e-4) return null;
+    const t = (a - b) / denom;
+    if (t <= 0.0 or t >= 1.0) return null;
+    return t;
+}
+
+fn evalQuadratic(curve: Curve, t: f32) Point {
+    const omt = 1.0 - t;
+    return .{
+        omt * omt * curve.x1 + 2.0 * omt * t * curve.x2 + t * t * curve.x3,
+        omt * omt * curve.y1 + 2.0 * omt * t * curve.y2 + t * t * curve.y3,
+    };
+}
+
+fn fallbackQuadPolygon(width: u32, height: u32) [4]Point {
+    return .{
+        .{ 0.0, 0.0 },
+        .{ 0.0, @floatFromInt(height) },
+        .{ @floatFromInt(width), @floatFromInt(height) },
+        .{ @floatFromInt(width), 0.0 },
+    };
+}
+
+fn polygonArea(points: []const Point) f32 {
+    return @abs(signedPolygonArea(points)) * 0.5;
+}
+
+fn signedPolygonArea(points: []const Point) f32 {
+    var area: f32 = 0.0;
+    for (points, 0..) |p, i| {
+        const q = points[(i + 1) % points.len];
+        area += p[0] * q[1] - q[0] * p[1];
+    }
+    return area;
+}
+
+fn polygonVertexNormal(prev: Point, current: Point, next: Point, winding: f32) Point {
+    const e0 = normalize2(.{ current[0] - prev[0], current[1] - prev[1] });
+    const e1 = normalize2(.{ next[0] - current[0], next[1] - current[1] });
+    const n0 = Point{ winding * e0[1], -winding * e0[0] };
+    const n1 = Point{ winding * e1[1], -winding * e1[0] };
+    const sum = Point{ n0[0] + n1[0], n0[1] + n1[1] };
+    const len2 = sum[0] * sum[0] + sum[1] * sum[1];
+    if (len2 < 1.0e-6) return n1;
+
+    const bisector = normalize2(sum);
+    const miter_scale = @max(0.05, bisector[0] * n1[0] + bisector[1] * n1[1]);
+    return .{
+        bisector[0] / miter_scale,
+        bisector[1] / miter_scale,
+    };
+}
+
+fn triangulatePolygon(indices: []u32, index_pos: *usize, base_vertex: u32, polygon: []const Point) void {
+    if (polygon.len < 3) return;
+    var i: usize = 1;
+    while (i + 1 < polygon.len) : (i += 1) {
+        indices[index_pos.* + 0] = base_vertex;
+        indices[index_pos.* + 1] = base_vertex + @as(u32, @intCast(i));
+        indices[index_pos.* + 2] = base_vertex + @as(u32, @intCast(i + 1));
+        index_pos.* += 3;
+    }
+}
+
+fn normalize2(v: Point) Point {
+    const len2 = v[0] * v[0] + v[1] * v[1];
+    if (len2 < 1.0e-8) return .{ 0.0, 1.0 };
+    const inv_len = 1.0 / @sqrt(len2);
+    return .{ v[0] * inv_len, v[1] * inv_len };
 }
 
 fn getKerning(face: c.FT_Face, left_glyph: u32, right_glyph: u32) f32 {
@@ -662,14 +1108,19 @@ fn getKerning(face: c.FT_Face, left_glyph: u32, right_glyph: u32) f32 {
     return @floatFromInt(vector.x);
 }
 
-fn findFontPath(allocator: std.mem.Allocator) ![]const u8 {
+fn findFontPath(allocator: std.mem.Allocator) !ResolvedPath {
     if (std.process.getEnvVarOwned(allocator, "ZSLUG_FONT_PATH")) |env_path| {
         errdefer allocator.free(env_path);
-        if (canOpenAbsolute(env_path)) return env_path;
+        if (canOpenPath(env_path)) return .{ .value = env_path, .owned = true };
         allocator.free(env_path);
     } else |err| switch (err) {
         error.EnvironmentVariableNotFound => {},
         else => return err,
+    }
+
+    if (build_options.demo_font_path.len != 0) {
+        const configured_path = build_options.demo_font_path;
+        if (canOpenPath(configured_path)) return .{ .value = configured_path, .owned = false };
     }
 
     const candidates = [_][]const u8{
@@ -680,19 +1131,45 @@ fn findFontPath(allocator: std.mem.Allocator) ![]const u8 {
         "/System/Library/Fonts/NewYork.ttf",
     };
     for (candidates) |candidate| {
-        if (canOpenAbsolute(candidate)) return candidate;
+        if (canOpenAbsolute(candidate)) return .{ .value = candidate, .owned = false };
     }
     return error.NoUsableFontFound;
 }
 
+fn findSlugPath(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(allocator, "ZSLUG_SLUG_PATH")) |env_path| {
+        errdefer allocator.free(env_path);
+        const file = std.fs.cwd().openFile(env_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                allocator.free(env_path);
+                return error.FileNotFound;
+            },
+            else => return err,
+        };
+        file.close();
+        return env_path;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const file = std.fs.cwd().openFile(build_options.demo_slug_path, .{}) catch return error.FileNotFound;
+    file.close();
+    return allocator.dupe(u8, build_options.demo_slug_path);
+}
+
 fn canOpenAbsolute(path: []const u8) bool {
+    if (!std.fs.path.isAbsolute(path)) return false;
     const file = std.fs.openFileAbsolute(path, .{}) catch return false;
     file.close();
     return true;
 }
 
-fn isStaticPath(path: []const u8) bool {
-    return std.mem.startsWith(u8, path, "/System/Library/Fonts/");
+fn canOpenPath(path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) return canOpenAbsolute(path);
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    file.close();
+    return true;
 }
 
 fn divCeil(a: u32, b: u32) u32 {
