@@ -148,8 +148,8 @@ pub const ContourCurveRefTable = struct {
     }
 };
 
-pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !SlugFile {
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, path, std.math.maxInt(usize));
+pub fn loadFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !SlugFile {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     errdefer allocator.free(bytes);
     return try parseBytesOwned(allocator, bytes);
 }
@@ -535,7 +535,7 @@ fn reverseTag(value: u32) [4]u8 {
 }
 
 test "parse arial slug header" {
-    var file = try loadFile(std.testing.allocator, "SlugDemo/Fonts/arial.slug");
+    var file = try loadFile(std.testing.allocator, std.testing.io, "SlugDemo/Fonts/arial.slug");
     defer file.deinit();
 
     try std.testing.expect(file.magicOk());
@@ -591,7 +591,7 @@ test "parse arial slug header" {
 }
 
 test "extract uncompressed georgia textures" {
-    var file = try loadFile(std.testing.allocator, "SlugDemo/Fonts/georgia_nc.slug");
+    var file = try loadFile(std.testing.allocator, std.testing.io, "SlugDemo/Fonts/georgia_nc.slug");
     defer file.deinit();
 
     try std.testing.expectEqualStrings("HLF4", &file.blocks[0].storageName());
@@ -609,7 +609,7 @@ test "extract uncompressed georgia textures" {
 }
 
 test "decode georgia polygon data" {
-    var file = try loadFile(std.testing.allocator, "SlugDemo/Fonts/georgia_nc.slug");
+    var file = try loadFile(std.testing.allocator, std.testing.io, "SlugDemo/Fonts/georgia_nc.slug");
     defer file.deinit();
 
     const font = try parsePrimaryFontHeader(file);
@@ -626,7 +626,7 @@ test "decode georgia polygon data" {
 }
 
 test "decode compressed contour curve reference prefix table" {
-    var file = try loadFile(std.testing.allocator, "SlugDemo/Fonts/arial.slug");
+    var file = try loadFile(std.testing.allocator, std.testing.io, "SlugDemo/Fonts/arial.slug");
     defer file.deinit();
 
     const font = try parsePrimaryFontHeader(file);
@@ -655,7 +655,7 @@ test "decode compressed contour curve reference prefix table" {
 }
 
 test "uncompressed font has no contour reference prefix table" {
-    var file = try loadFile(std.testing.allocator, "SlugDemo/Fonts/georgia_nc.slug");
+    var file = try loadFile(std.testing.allocator, std.testing.io, "SlugDemo/Fonts/georgia_nc.slug");
     defer file.deinit();
 
     const font = try parsePrimaryFontHeader(file);

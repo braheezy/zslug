@@ -147,18 +147,28 @@ const BuildState = struct {
     }
 };
 
-pub fn buildDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
-    return buildDemoSceneFromSlug(allocator, viewport);
+pub fn buildDemoScene(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    viewport: [2]f32,
+) !Scene {
+    return buildDemoSceneFromSlug(allocator, io, environ_map, viewport);
 }
 
-fn buildDemoSceneFromSlug(allocator: std.mem.Allocator, viewport: [2]f32) !Scene {
+fn buildDemoSceneFromSlug(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ_map: *const std.process.Environ.Map,
+    viewport: [2]f32,
+) !Scene {
     const backend = font_backend.defaultBackend();
-    const slug_path = if (backend == .slug_reference) try findSlugPath(allocator) else null;
+    const slug_path = if (backend == .slug_reference) try findSlugPath(allocator, io, environ_map) else null;
     defer if (slug_path) |path| allocator.free(path);
-    const font_path = if (backend == .native_generator) try findFontPath(allocator) else null;
+    const font_path = if (backend == .native_generator) try findFontPath(allocator, io, environ_map) else null;
     defer if (font_path) |path| if (path.owned) allocator.free(path.value);
 
-    var runtime_font = try font_backend.loadRuntimeFont(allocator, .{
+    var runtime_font = try font_backend.loadRuntimeFont(allocator, io, .{
         .text = build_options.demo_text,
         .slug_path = slug_path,
         .font_path = if (font_path) |path| path.value else null,
@@ -1108,19 +1118,16 @@ fn getKerning(face: c.FT_Face, left_glyph: u32, right_glyph: u32) f32 {
     return @floatFromInt(vector.x);
 }
 
-fn findFontPath(allocator: std.mem.Allocator) !ResolvedPath {
-    if (std.process.getEnvVarOwned(allocator, "ZSLUG_FONT_PATH")) |env_path| {
-        errdefer allocator.free(env_path);
-        if (canOpenPath(env_path)) return .{ .value = env_path, .owned = true };
+fn findFontPath(allocator: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) !ResolvedPath {
+    if (environ_map.get("ZSLUG_FONT_PATH")) |value| {
+        const env_path = try allocator.dupe(u8, value);
+        if (canOpenPath(io, env_path)) return .{ .value = env_path, .owned = true };
         allocator.free(env_path);
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
     }
 
     if (build_options.demo_font_path.len != 0) {
         const configured_path = build_options.demo_font_path;
-        if (canOpenPath(configured_path)) return .{ .value = configured_path, .owned = false };
+        if (canOpenPath(io, configured_path)) return .{ .value = configured_path, .owned = false };
     }
 
     const candidates = [_][]const u8{
@@ -1131,44 +1138,42 @@ fn findFontPath(allocator: std.mem.Allocator) !ResolvedPath {
         "/System/Library/Fonts/NewYork.ttf",
     };
     for (candidates) |candidate| {
-        if (canOpenAbsolute(candidate)) return .{ .value = candidate, .owned = false };
+        if (canOpenAbsolute(io, candidate)) return .{ .value = candidate, .owned = false };
     }
     return error.NoUsableFontFound;
 }
 
-fn findSlugPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "ZSLUG_SLUG_PATH")) |env_path| {
+fn findSlugPath(allocator: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("ZSLUG_SLUG_PATH")) |value| {
+        const env_path = try allocator.dupe(u8, value);
         errdefer allocator.free(env_path);
-        const file = std.fs.cwd().openFile(env_path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.cwd().openFile(io, env_path, .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 allocator.free(env_path);
                 return error.FileNotFound;
             },
             else => return err,
         };
-        file.close();
+        file.close(io);
         return env_path;
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => {},
-        else => return err,
     }
 
-    const file = std.fs.cwd().openFile(build_options.demo_slug_path, .{}) catch return error.FileNotFound;
-    file.close();
+    const file = std.Io.Dir.cwd().openFile(io, build_options.demo_slug_path, .{}) catch return error.FileNotFound;
+    file.close(io);
     return allocator.dupe(u8, build_options.demo_slug_path);
 }
 
-fn canOpenAbsolute(path: []const u8) bool {
+fn canOpenAbsolute(io: std.Io, path: []const u8) bool {
     if (!std.fs.path.isAbsolute(path)) return false;
-    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    file.close();
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    file.close(io);
     return true;
 }
 
-fn canOpenPath(path: []const u8) bool {
-    if (std.fs.path.isAbsolute(path)) return canOpenAbsolute(path);
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    file.close();
+fn canOpenPath(io: std.Io, path: []const u8) bool {
+    if (std.fs.path.isAbsolute(path)) return canOpenAbsolute(io, path);
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    file.close(io);
     return true;
 }
 

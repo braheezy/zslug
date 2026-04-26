@@ -46,13 +46,13 @@ auto_motion: bool = true,
 reset_was_down: bool = false,
 drift_toggle_was_down: bool = false,
 
-pub fn init(allocator: std.mem.Allocator) !*App {
+pub fn init(allocator: std.mem.Allocator, io: std.Io, environ_map: *const std.process.Environ.Map) !*App {
     try zglfw.init();
     errdefer zglfw.terminate();
 
     zglfw.windowHint(.client_api, .no_api);
     zglfw.windowHint(.resizable, false);
-    const window = try zglfw.createWindow(800, 600, "zslug", null);
+    const window = try zglfw.createWindow(800, 600, "zslug", null, null);
     errdefer zglfw.destroyWindow(window);
 
     const app = try allocator.create(App);
@@ -79,7 +79,7 @@ pub fn init(allocator: std.mem.Allocator) !*App {
     }, .{});
     errdefer app.gfx.destroy(allocator);
 
-    app.scene = try zslug.slug.buildDemoScene(allocator, .{
+    app.scene = try zslug.slug.buildDemoScene(allocator, io, environ_map, .{
         @floatFromInt(app.gfx.width),
         @floatFromInt(app.gfx.height),
     });

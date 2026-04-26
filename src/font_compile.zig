@@ -1,18 +1,15 @@
 const std = @import("std");
 const zslug = @import("zslug");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-
-    _ = args.next();
-    const font_path = args.next() orelse return usage();
-    const out_path = args.next() orelse return usage();
-    const coverage_arg = args.next() orelse "ascii";
+    if (args.len < 3) return usage();
+    const font_path = args[1];
+    const out_path = args[2];
+    const coverage_arg = if (args.len > 3) args[3] else "ascii";
 
     const coverage: zslug.native_generator.Coverage = if (std.mem.eql(u8, coverage_arg, "ascii"))
         .ascii_basic
@@ -26,10 +23,10 @@ pub fn main() !void {
         .coverage = coverage,
     });
     defer font.deinit();
-    try font.saveToFile(out_path);
+    try font.saveToFile(io, out_path);
 
     var stdout_buffer: [1024]u8 = undefined;
-    var out = std.fs.File.stdout().writer(&stdout_buffer);
+    var out = std.Io.File.stdout().writer(io, &stdout_buffer);
     try out.interface.print(
         "wrote {s} glyphs={} cmap={} curves={}x{} bands={}x{}\n",
         .{
@@ -46,9 +43,6 @@ pub fn main() !void {
 }
 
 fn usage() !void {
-    var stderr_buffer: [256]u8 = undefined;
-    var err = std.fs.File.stderr().writer(&stderr_buffer);
-    try err.interface.writeAll("usage: font-compile <font-path> <out-path> [ascii|all]\n");
-    try err.interface.flush();
+    std.debug.print("usage: font-compile <font-path> <out-path> [ascii|all]\n", .{});
     return error.InvalidArguments;
 }

@@ -79,17 +79,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.linkLibC();
-    exe.linkLibrary(zglfw_dep.artifact("glfw"));
-    exe.linkSystemLibrary("freetype");
-    parity_report_exe.linkLibC();
-    parity_report_exe.linkSystemLibrary("freetype");
-    font_compile_exe.linkLibC();
-    font_compile_exe.linkSystemLibrary("freetype");
+    exe.root_module.link_libc = true;
+    exe.root_module.linkLibrary(zglfw_dep.artifact("glfw"));
+    exe.root_module.linkSystemLibrary("freetype", .{});
+    parity_report_exe.root_module.link_libc = true;
+    parity_report_exe.root_module.linkSystemLibrary("freetype", .{});
+    font_compile_exe.root_module.link_libc = true;
+    font_compile_exe.root_module.linkSystemLibrary("freetype", .{});
     if (enable_harfbuzz) {
-        exe.linkSystemLibrary("harfbuzz");
-        parity_report_exe.linkSystemLibrary("harfbuzz");
-        font_compile_exe.linkSystemLibrary("harfbuzz");
+        exe.root_module.linkSystemLibrary("harfbuzz", .{});
+        parity_report_exe.root_module.linkSystemLibrary("harfbuzz", .{});
+        font_compile_exe.root_module.linkSystemLibrary("harfbuzz", .{});
     }
 
     b.installArtifact(exe);
@@ -114,10 +114,10 @@ pub fn build(b: *std.Build) void {
             lib_tests.root_module.addIncludePath(.{ .cwd_relative = path });
         }
     }
-    lib_tests.linkLibC();
-    lib_tests.linkSystemLibrary("freetype");
+    lib_tests.root_module.link_libc = true;
+    lib_tests.root_module.linkSystemLibrary("freetype", .{});
     if (enable_harfbuzz) {
-        lib_tests.linkSystemLibrary("harfbuzz");
+        lib_tests.root_module.linkSystemLibrary("harfbuzz", .{});
     }
 
     const test_step = b.step("test", "Run library tests");

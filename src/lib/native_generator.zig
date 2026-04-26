@@ -1937,8 +1937,8 @@ fn findTestFontPath() ?[]const u8 {
         "/System/Library/Fonts/HelveticaNeue.ttc",
     };
     for (candidates) |candidate| {
-        const file = std.fs.openFileAbsolute(candidate, .{}) catch continue;
-        file.close();
+        const file = std.Io.Dir.openFileAbsolute(std.testing.io, candidate, .{}) catch continue;
+        file.close(std.testing.io);
         return candidate;
     }
     return null;

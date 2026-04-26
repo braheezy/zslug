@@ -320,7 +320,7 @@ test "glyph mask diff is zero for identical glyphs" {
     const allocator = std.testing.allocator;
     if (!canOpenRelative("SlugDemo/Fonts/georgia_nc.slug")) return error.SkipZigTest;
 
-    var font = try font_backend.loadRuntimeFont(allocator, .{
+    var font = try font_backend.loadRuntimeFont(allocator, std.testing.io, .{
         .text = "MW",
         .slug_path = "SlugDemo/Fonts/georgia_nc.slug",
         .backend = .slug_reference,
@@ -343,7 +343,7 @@ test "glyph mask diff distinguishes different glyph shapes" {
     const allocator = std.testing.allocator;
     if (!canOpenRelative("SlugDemo/Fonts/georgia_nc.slug")) return error.SkipZigTest;
 
-    var font = try font_backend.loadRuntimeFont(allocator, .{
+    var font = try font_backend.loadRuntimeFont(allocator, std.testing.io, .{
         .text = "MW",
         .slug_path = "SlugDemo/Fonts/georgia_nc.slug",
         .backend = .slug_reference,
@@ -367,14 +367,14 @@ test "reference and native glyph mask comparison runs" {
     const font_path = findArialFontPath() orelse return error.SkipZigTest;
     if (!canOpenRelative("SlugDemo/Fonts/arial.slug")) return error.SkipZigTest;
 
-    var reference_font = try font_backend.loadRuntimeFont(allocator, .{
+    var reference_font = try font_backend.loadRuntimeFont(allocator, std.testing.io, .{
         .text = "Meow?!",
         .slug_path = "SlugDemo/Fonts/arial.slug",
         .backend = .slug_reference,
     });
     defer reference_font.deinit();
 
-    var native_font = try font_backend.loadRuntimeFont(allocator, .{
+    var native_font = try font_backend.loadRuntimeFont(allocator, std.testing.io, .{
         .text = "Meow?!",
         .font_path = font_path,
         .backend = .native_generator,
@@ -399,8 +399,8 @@ test "reference and native glyph mask comparison runs" {
 }
 
 fn canOpenRelative(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    file.close();
+    const file = std.Io.Dir.cwd().openFile(std.testing.io, path, .{}) catch return false;
+    file.close(std.testing.io);
     return true;
 }
 
@@ -410,8 +410,8 @@ fn findArialFontPath() ?[]const u8 {
         "/Library/Fonts/Arial.ttf",
     };
     for (candidates) |candidate| {
-        const file = std.fs.openFileAbsolute(candidate, .{}) catch continue;
-        file.close();
+        const file = std.Io.Dir.openFileAbsolute(std.testing.io, candidate, .{}) catch continue;
+        file.close(std.testing.io);
         return candidate;
     }
     return null;

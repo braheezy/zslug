@@ -36,9 +36,9 @@ pub fn defaultBackend() Backend {
     return .slug_reference;
 }
 
-pub fn loadRuntimeFont(allocator: std.mem.Allocator, config: LoadConfig) !runtime.RuntimeFont {
+pub fn loadRuntimeFont(allocator: std.mem.Allocator, io: std.Io, config: LoadConfig) !runtime.RuntimeFont {
     return switch (config.backend) {
-        .slug_reference => loadReferenceSlugFont(allocator, config),
+        .slug_reference => loadReferenceSlugFont(allocator, io, config),
         .native_generator => buildNativeRuntimeFont(allocator, .{
             .text = config.text,
             .font_path = config.font_path orelse return error.MissingFontPath,
@@ -74,9 +74,9 @@ pub fn compileNativeFontAsset(allocator: std.mem.Allocator, config: CompileFontC
     });
 }
 
-fn loadReferenceSlugFont(allocator: std.mem.Allocator, config: LoadConfig) !runtime.RuntimeFont {
+fn loadReferenceSlugFont(allocator: std.mem.Allocator, io: std.Io, config: LoadConfig) !runtime.RuntimeFont {
     const slug_path = config.slug_path orelse return error.MissingSlugPath;
-    var file = try slug_parse.loadFile(allocator, slug_path);
+    var file = try slug_parse.loadFile(allocator, io, slug_path);
     defer file.deinit();
 
     const font = try slug_parse.parsePrimaryFontHeader(file);
@@ -180,14 +180,14 @@ test "reference and native backends align on basic glyph metrics" {
         return error.SkipZigTest;
     const font_path = findArialFontPath() orelse return error.SkipZigTest;
 
-    var reference_font = try loadRuntimeFont(allocator, .{
+    var reference_font = try loadRuntimeFont(allocator, std.testing.io, .{
         .text = "Meow?!",
         .slug_path = slug_path,
         .backend = .slug_reference,
     });
     defer reference_font.deinit();
 
-    var native_font = try loadRuntimeFont(allocator, .{
+    var native_font = try loadRuntimeFont(allocator, std.testing.io, .{
         .text = "Meow?!",
         .font_path = font_path,
         .backend = .native_generator,
@@ -197,7 +197,7 @@ test "reference and native backends align on basic glyph metrics" {
 
     var reference_model = try font_model.fromRuntimeFont(allocator, reference_font);
     defer reference_model.deinit();
-    var file = try slug_parse.loadFile(allocator, slug_path);
+    var file = try slug_parse.loadFile(allocator, std.testing.io, slug_path);
     defer file.deinit();
     const font = try slug_parse.parsePrimaryFontHeader(file);
     var contour_refs = try slug_parse.extractContourCurveRefs(allocator, file, font);
@@ -223,8 +223,8 @@ test "reference and native backends align on basic glyph metrics" {
 }
 
 fn canOpenRelative(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    file.close();
+    const file = std.Io.Dir.cwd().openFile(std.testing.io, path, .{}) catch return false;
+    file.close(std.testing.io);
     return true;
 }
 
@@ -234,8 +234,8 @@ fn findArialFontPath() ?[]const u8 {
         "/Library/Fonts/Arial.ttf",
     };
     for (candidates) |candidate| {
-        const file = std.fs.openFileAbsolute(candidate, .{}) catch continue;
-        file.close();
+        const file = std.Io.Dir.openFileAbsolute(std.testing.io, candidate, .{}) catch continue;
+        file.close(std.testing.io);
         return candidate;
     }
     return null;

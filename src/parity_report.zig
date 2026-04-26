@@ -2,26 +2,25 @@ const std = @import("std");
 const build_options = @import("build_options");
 const zslug = @import("zslug");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const slug_path = try resolveSlugPath();
-    const font_path = try resolveFontPath(slug_path);
+    const slug_path = try resolveSlugPath(io);
+    const font_path = try resolveFontPath(io, slug_path);
     const text = build_options.demo_text;
 
     var stdout_buffer: [4096]u8 = undefined;
-    var out = std.fs.File.stdout().writer(&stdout_buffer);
+    var out = std.Io.File.stdout().writer(io, &stdout_buffer);
 
-    var reference_font = try zslug.font_backend.loadRuntimeFont(allocator, .{
+    var reference_font = try zslug.font_backend.loadRuntimeFont(allocator, io, .{
         .text = text,
         .slug_path = slug_path,
         .backend = .slug_reference,
     });
     defer reference_font.deinit();
 
-    var native_font = try zslug.font_backend.loadRuntimeFont(allocator, .{
+    var native_font = try zslug.font_backend.loadRuntimeFont(allocator, io, .{
         .text = text,
         .font_path = font_path,
         .backend = .native_generator,
@@ -36,7 +35,7 @@ pub fn main() !void {
     var native_band_debug = std.AutoHashMap(u32, zslug.native_generator.BandHeuristicDebug).init(allocator);
     defer native_band_debug.deinit();
 
-    var file = try zslug.slug_parse.loadFile(allocator, slug_path);
+    var file = try zslug.slug_parse.loadFile(allocator, io, slug_path);
     defer file.deinit();
     const font = try zslug.slug_parse.parsePrimaryFontHeader(file);
     var contour_refs = try zslug.slug_parse.extractContourCurveRefs(allocator, file, font);
@@ -262,15 +261,15 @@ pub fn main() !void {
     try out.interface.flush();
 }
 
-fn resolveSlugPath() ![]const u8 {
-    if (canOpenRelative(build_options.demo_slug_path)) return build_options.demo_slug_path;
-    if (canOpenRelative("SlugDemo/Fonts/georgia_nc.slug")) return "SlugDemo/Fonts/georgia_nc.slug";
-    if (canOpenRelative("SlugDemo/Fonts/arial.slug")) return "SlugDemo/Fonts/arial.slug";
+fn resolveSlugPath(io: std.Io) ![]const u8 {
+    if (canOpenRelative(io, build_options.demo_slug_path)) return build_options.demo_slug_path;
+    if (canOpenRelative(io, "SlugDemo/Fonts/georgia_nc.slug")) return "SlugDemo/Fonts/georgia_nc.slug";
+    if (canOpenRelative(io, "SlugDemo/Fonts/arial.slug")) return "SlugDemo/Fonts/arial.slug";
     return error.MissingSlugPath;
 }
 
-fn resolveFontPath(slug_path: []const u8) ![]const u8 {
-    if (build_options.demo_font_path.len != 0 and canOpenAbsolute(build_options.demo_font_path)) {
+fn resolveFontPath(io: std.Io, slug_path: []const u8) ![]const u8 {
+    if (build_options.demo_font_path.len != 0 and canOpenAbsolute(io, build_options.demo_font_path)) {
         return build_options.demo_font_path;
     }
 
@@ -288,7 +287,7 @@ fn resolveFontPath(slug_path: []const u8) ![]const u8 {
     else
         arial_candidates[0..];
     for (candidates) |candidate| {
-        if (canOpenAbsolute(candidate)) return candidate;
+        if (canOpenAbsolute(io, candidate)) return candidate;
     }
     return error.MissingFontPath;
 }
@@ -307,15 +306,15 @@ fn displayCodepoint(codepoint: u32) u8 {
     };
 }
 
-fn canOpenRelative(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    file.close();
+fn canOpenRelative(io: std.Io, path: []const u8) bool {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    file.close(io);
     return true;
 }
 
-fn canOpenAbsolute(path: []const u8) bool {
-    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
-    file.close();
+fn canOpenAbsolute(io: std.Io, path: []const u8) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    file.close(io);
     return true;
 }
 

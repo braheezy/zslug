@@ -135,11 +135,11 @@ pub const CompiledFont = struct {
         return self.lookupGlyphIndex('?') orelse self.lookupGlyphIndex(' ');
     }
 
-    pub fn saveToFile(self: CompiledFont, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+    pub fn saveToFile(self: CompiledFont, io: std.Io, path: []const u8) !void {
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
         var writer_buffer: [4096]u8 = undefined;
-        var writer = file.writer(&writer_buffer);
+        var writer = file.writer(io, &writer_buffer);
 
         try writeU32(&writer, magic);
         try writeU32(&writer, version);
@@ -171,11 +171,11 @@ pub const CompiledFont = struct {
         try writer.interface.flush();
     }
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !CompiledFont {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !CompiledFont {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
         var reader_buffer: [4096]u8 = undefined;
-        var reader = file.reader(&reader_buffer);
+        var reader = file.reader(io, &reader_buffer);
 
         if (try readU32(&reader) != magic) return error.InvalidFontAsset;
         if (try readU32(&reader) != version) return error.UnsupportedFontAssetVersion;
@@ -372,9 +372,9 @@ test "compiled font serializes and loads" {
     };
 
     const path = "zig-cache/test-font.zsf";
-    try font.saveToFile(path);
+    try font.saveToFile(std.testing.io, path);
 
-    var loaded = try CompiledFont.loadFromFile(allocator, path);
+    var loaded = try CompiledFont.loadFromFile(allocator, std.testing.io, path);
     defer loaded.deinit();
 
     try std.testing.expectEqual(@as(u32, 1000), loaded.units_per_em);

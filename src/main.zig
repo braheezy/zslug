@@ -4,7 +4,7 @@ const zslug = @import("zslug");
 
 const App = @import("App.zig");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // Memory allocation setup
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     // Memory allocation setup
@@ -21,7 +21,7 @@ pub fn main() !void {
         }
     };
 
-    const app = try App.init(allocator);
+    const app = try App.init(allocator, init.io, init.environ_map);
     defer app.deinit();
 
     while (app.isRunning()) {
