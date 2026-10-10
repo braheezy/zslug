@@ -5,18 +5,22 @@
     .paths = .{"src/"},
     .fingerprint = 0xcc994b0d9fe3f069,
     .dependencies = .{
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c#875969d3493e245e01bf5d7860f792d8f3eb9ef5",
+            .hash = "translate_c-0.0.0-Q_BUWoFOBwAhz77Zd15HCVuhTKzdUKc94kezmCeJ7IC_",
+        },
         // To handle windowing and input
         .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#51003c105d23db378bb59ce415a387b22f1b0892",
-            .hash = "zglfw-0.10.0-dev-zgVDNIy4IQDJNRy4jrP1As-SZxfJpuWhU1iJ-wBab_VD",
+            .url = "git+https://github.com/braheezy/zglfw#14d915531dc489d7856b3d090b1c005ae625980c",
+            .hash = "zglfw-0.11.0-zgVDNMa8IQDeHyHYK4VgshNdMBxs-XNvf-X46csjMvPS",
         },
         .zgpu = .{
-            .url = "git+https://github.com/braheezy/zgpu#9d71285e1f9b86834aa2ad5051bd08350a53ecfa",
-            .hash = "zgpu-0.15.0-nqFT5MUaFQDt9wJqw_QcuNBMp9IvJDpgi52BWFWGu02S",
+            .url = "git+https://github.com/braheezy/zgpu#c6aece8bc8643d0f3c43e688159b5580ce5d681d",
+            .hash = "zgpu-0.16.0-nqFT5MF0GQCeYsoX-qhu3G7MWKZLgRgeH2q-b5AVCSv-",
         },
         .zmath = .{
-            .url = "git+https://github.com/zig-gamedev/zmath#9f7beb0753bd5cf885285dda8b00361c87c5b6b3",
-            .hash = "zmath-0.11.0-dev-wjwivTktAwA6BEsaW_p-6BFNCYSKMRFONlj6Fxkmuz9d",
+            .url = "git+https://github.com/braheezy/zmath#d5fa55fc7d2db3a1ab4dcea1434a0423e7ad5779",
+            .hash = "zmath-0.12.0-wjwivfMtAwBEt0kCv7kh538uzhr02QUPU8Ds5RgU635A",
         },
     },
 }

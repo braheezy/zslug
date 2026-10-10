@@ -60,12 +60,7 @@ pub fn shapeUtf8HarfBuzzFtFace(
 }
 
 const harfbuzz_impl = if (build_options.enable_harfbuzz) struct {
-    const c = @cImport({
-        @cInclude("ft2build.h");
-        @cInclude("freetype/freetype.h");
-        @cInclude("hb.h");
-        @cInclude("hb-ft.h");
-    });
+    const c = @import("font_c");
 
     pub fn shapeUtf8HarfBuzzFtFace(
         allocator: std.mem.Allocator,

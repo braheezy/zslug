@@ -3,11 +3,7 @@ const build_options = @import("build_options");
 const font_backend = @import("font_backend.zig");
 const runtime = @import("runtime_font.zig");
 
-const c = @cImport({
-    @cInclude("ft2build.h");
-    @cInclude("freetype/freetype.h");
-    @cInclude("freetype/ftoutln.h");
-});
+const c = @import("font_c");
 
 pub const texture_width: u32 = 4096;
 
@@ -204,7 +200,7 @@ fn buildFreeTypeDemoScene(allocator: std.mem.Allocator, viewport: [2]f32) !Scene
     const font_path = try findFontPath(allocator);
     defer if (font_path.owned) allocator.free(font_path.value);
 
-    const font_path_z = try allocator.dupeZ(u8, font_path.value);
+    const font_path_z = try allocator.dupeSentinel(u8, font_path.value, 0);
     defer allocator.free(font_path_z);
 
     var face: c.FT_Face = undefined;

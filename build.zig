@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -8,14 +9,34 @@ pub fn build(b: *std.Build) void {
     const demo_font_path = b.option([]const u8, "font-path", "Path to the source font file used by the native generator backend") orelse "";
     const runtime_backend = b.option([]const u8, "runtime-backend", "Font runtime backend: slug_reference or native_generator") orelse "native_generator";
     const enable_harfbuzz = b.option(bool, "harfbuzz", "Enable HarfBuzz shaping scaffolding") orelse false;
-    const freetype_include_candidates = [_][]const u8{
-        "/opt/homebrew/opt/freetype/include/freetype2",
-        "/usr/local/opt/freetype/include/freetype2",
-    };
-    const harfbuzz_include_candidates = [_][]const u8{
-        "/opt/homebrew/include/harfbuzz",
-        "/usr/local/include/harfbuzz",
-    };
+    const freetype_headers =
+        \\#include <ft2build.h>
+        \\#include <freetype/freetype.h>
+        \\#include <freetype/ftoutln.h>
+        \\
+    ;
+    const harfbuzz_headers: []const u8 = if (enable_harfbuzz)
+        \\#include <hb.h>
+        \\#include <hb-ft.h>
+        \\
+    else
+        "";
+    const font_headers = b.addWriteFiles().add("font.h", b.fmt("{s}{s}", .{
+        freetype_headers,
+        harfbuzz_headers,
+    }));
+    const font_c = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = "font_c",
+        .c_source_file = font_headers,
+        .target = target,
+        .optimize = optimize,
+        .link_system_libs = if (enable_harfbuzz) &.{
+            .{ .name = "freetype2", .options = .{ .use_pkg_config = .force } },
+            .{ .name = "harfbuzz", .options = .{ .use_pkg_config = .force } },
+        } else &.{
+            .{ .name = "freetype2", .options = .{ .use_pkg_config = .force } },
+        },
+    });
 
     const zgpu = b.dependency("zgpu", .{}).module("root");
     const zglfw_dep = b.dependency("zglfw", .{});
@@ -33,14 +54,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zslug_mod.addImport("build_options", build_options_mod);
-    for (freetype_include_candidates) |path| {
-        zslug_mod.addIncludePath(.{ .cwd_relative = path });
-    }
-    if (enable_harfbuzz) {
-        for (harfbuzz_include_candidates) |path| {
-            zslug_mod.addIncludePath(.{ .cwd_relative = path });
-        }
-    }
+    zslug_mod.addImport("font_c", font_c.mod);
     const exe = b.addExecutable(.{
         .name = "zig",
         .root_module = b.createModule(.{
@@ -81,16 +95,8 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.link_libc = true;
     exe.root_module.linkLibrary(zglfw_dep.artifact("glfw"));
-    exe.root_module.linkSystemLibrary("freetype", .{});
     parity_report_exe.root_module.link_libc = true;
-    parity_report_exe.root_module.linkSystemLibrary("freetype", .{});
     font_compile_exe.root_module.link_libc = true;
-    font_compile_exe.root_module.linkSystemLibrary("freetype", .{});
-    if (enable_harfbuzz) {
-        exe.root_module.linkSystemLibrary("harfbuzz", .{});
-        parity_report_exe.root_module.linkSystemLibrary("harfbuzz", .{});
-        font_compile_exe.root_module.linkSystemLibrary("harfbuzz", .{});
-    }
 
     b.installArtifact(exe);
     b.installArtifact(parity_report_exe);
@@ -103,22 +109,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "build_options", .module = build_options_mod },
+                .{ .name = "font_c", .module = font_c.mod },
             },
         }),
     });
-    for (freetype_include_candidates) |path| {
-        lib_tests.root_module.addIncludePath(.{ .cwd_relative = path });
-    }
-    if (enable_harfbuzz) {
-        for (harfbuzz_include_candidates) |path| {
-            lib_tests.root_module.addIncludePath(.{ .cwd_relative = path });
-        }
-    }
     lib_tests.root_module.link_libc = true;
-    lib_tests.root_module.linkSystemLibrary("freetype", .{});
-    if (enable_harfbuzz) {
-        lib_tests.root_module.linkSystemLibrary("harfbuzz", .{});
-    }
 
     const test_step = b.step("test", "Run library tests");
     const run_lib_tests = b.addRunArtifact(lib_tests);
@@ -139,9 +134,7 @@ pub fn build(b: *std.Build) void {
     parity_report_cmd.step.dependOn(b.getInstallStep());
     font_compile_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-        parity_report_cmd.addArgs(args);
-        font_compile_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
+    parity_report_cmd.addPassthruArgs();
+    font_compile_cmd.addPassthruArgs();
 }

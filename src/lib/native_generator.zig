@@ -2,11 +2,7 @@ const std = @import("std");
 const runtime = @import("runtime_font.zig");
 const text_shape = @import("text_shape.zig");
 
-const c = @cImport({
-    @cInclude("ft2build.h");
-    @cInclude("freetype/freetype.h");
-    @cInclude("freetype/ftoutln.h");
-});
+const c = @import("font_c");
 
 pub const texture_width: u32 = 4096;
 
@@ -99,7 +95,7 @@ pub fn makeBuildPlan(allocator: std.mem.Allocator, config: GeneratorConfig) !Bui
     if (c.FT_Init_FreeType(&ft_library) != 0) return error.FreeTypeInitFailed;
     defer _ = c.FT_Done_FreeType(ft_library);
 
-    const font_path_z = try allocator.dupeZ(u8, config.font_path);
+    const font_path_z = try allocator.dupeSentinel(u8, config.font_path, 0);
     defer allocator.free(font_path_z);
 
     var face: c.FT_Face = undefined;
@@ -196,7 +192,7 @@ pub fn buildRuntimeFont(allocator: std.mem.Allocator, config: GeneratorConfig) !
     if (c.FT_Init_FreeType(&ft_library) != 0) return error.FreeTypeInitFailed;
     defer _ = c.FT_Done_FreeType(ft_library);
 
-    const font_path_z = try allocator.dupeZ(u8, config.font_path);
+    const font_path_z = try allocator.dupeSentinel(u8, config.font_path, 0);
     defer allocator.free(font_path_z);
 
     var face: c.FT_Face = undefined;
@@ -272,7 +268,7 @@ pub fn compileFont(allocator: std.mem.Allocator, config: CompileFontConfig) !run
     if (c.FT_Init_FreeType(&ft_library) != 0) return error.FreeTypeInitFailed;
     defer _ = c.FT_Done_FreeType(ft_library);
 
-    const font_path_z = try allocator.dupeZ(u8, config.font_path);
+    const font_path_z = try allocator.dupeSentinel(u8, config.font_path, 0);
     defer allocator.free(font_path_z);
 
     var face: c.FT_Face = undefined;
@@ -383,7 +379,7 @@ pub fn debugBandHeuristicForGlyph(allocator: std.mem.Allocator, font_path: []con
     if (c.FT_Init_FreeType(&ft_library) != 0) return error.FreeTypeInitFailed;
     defer _ = c.FT_Done_FreeType(ft_library);
 
-    const font_path_z = try allocator.dupeZ(u8, font_path);
+    const font_path_z = try allocator.dupeSentinel(u8, font_path, 0);
     defer allocator.free(font_path_z);
 
     var face: c.FT_Face = undefined;
@@ -1223,10 +1219,8 @@ fn analyzeBandCountForAxis(
             significant_count <= other_significant_count or
             activity.activity_transition_count <= 4;
         if (should_apply_activity_cap) {
-            const dominant_axis_bonus: u32 = if (
-                activity.activity_transition_count <= 4 and
-                significant_count > other_significant_count
-            )
+            const dominant_axis_bonus: u32 = if (activity.activity_transition_count <= 4 and
+                significant_count > other_significant_count)
                 3
             else
                 0;
@@ -1561,7 +1555,7 @@ fn countDistinctCurveExtentBinsForAxis(curves: []const Curve, axis: Axis, dim: f
     if (!saw_significant) return 1;
 
     const span = @max(0.0001, @max(dim, axis_max - axis_min));
-    var occupied = [_]bool{false} ** 6;
+    var occupied: [6]bool = @splat(false);
     for (curves) |curve| {
         if (curveAxisDelta(curve, axis) <= threshold) continue;
         occupied[quantizeAxisValueToExtentBin(curveAxisMin(curve, axis), axis_min, span)] = true;
